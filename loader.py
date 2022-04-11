@@ -20,27 +20,18 @@ class MultiFolderLoader(Dataset):
         self.root = root
         self.ret_class = ret_class
         self.directories = np.sort(os.listdir(root))
-        #print(self.directories)
-        #print(num_classes)
         self.annotations = []
         self.class_labels = []
         self.img_type = img_type
         class_label = 0
-        #print("Loading...")
-        #print(start_indx)
         for i in range(start_indx, num_classes+start_indx):
             PATH = os.path.join(self.root, self.directories[i])
-            #print(PATH)
             if os.path.isdir(PATH):
                 for file in os.listdir(PATH):
-                    #print(file)
                     if file.endswith(self.img_type):
-                        #print(file)
                         self.annotations.append(os.path.join(PATH, file))
                         self.class_labels.append(class_label)
                 class_label +=1
-        #print(len(self.annotations))
-        #print("done!")
         
     def __getitem__(self, index):
         img_id = self.annotations[index]
