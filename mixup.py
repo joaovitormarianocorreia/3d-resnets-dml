@@ -1,45 +1,26 @@
+import os
+import argparse
 import torch
-import torch.nn as nn
 import torchvision
-from torchvision import transforms
-from torch.utils.data import DataLoader
+import torch.nn as nn
+import numpy as np
 import torch.optim as optim
-import torch.nn.functional as functional
-from torchvision.utils import save_image
+import matplotlib.pyplot as plt
 
+from tensorboardX import SummaryWriter
+from torch.utils.data import DataLoader
+from torchvision import transforms
 from neighbours import find_neighbours
 from classifier import GaussianKernels
 from loader import MultiFolderLoader
-
-from tensorboardX import SummaryWriter
-import matplotlib.pyplot as plt
 from tqdm import tqdm
-
 from torch.autograd import Variable
-
-import numpy as np
-import os
-import subprocess
-import argparse
-import scipy
-
-from copy import deepcopy
 from sklearn.manifold import TSNE
-
-#import auto_augment as ag
 from utils import *
-
+from sklearn.preprocessing import MinMaxScaler
 
 ######################## imports Utils ############################################
-from sklearn.neighbors import (NeighborhoodComponentsAnalysis,
-KNeighborsClassifier)
-from sklearn.metrics import accuracy_score
-from sklearn.metrics import pairwise_distances
-#from scipy.spatial.distance.cdist import distance
-from scipy.spatial import distance
-from sklearn.preprocessing import MinMaxScaler
 scaler = MinMaxScaler()
-
 
 parser = argparse.ArgumentParser(description="Train Gaussian kernel classifier using Resnet18 or 50.")
 parser.add_argument("--data_dir", required=True, type=str, help="Path to data parent directory.")
@@ -57,8 +38,8 @@ parser.add_argument("--update_interval", default=5, type=int, help="Stored centr
 parser.add_argument("--max_epochs", default=50, type=int, help="Maximum training length (epochs).")
 parser.add_argument("--topk", default=20, type=int, help="top k.")
 parser.add_argument("--input_size", default=256, type=int, help="input size img.")
-
 parser.add_argument("--name", default=" ", required=True, type=str, help="Dataset file name extensions (e.g. cifar10, cifar100).")
+
 ####MIXUP
 parser.add_argument('--alpha', default=1, type=float,help='mixup interpolation coefficient (default: 1)')
 parser.add_argument('--scale_mixup', default=0.0001, type=float,help='scaling the mixup loss')
@@ -81,34 +62,32 @@ result_model.append("============================= \n")
 Configuration
 """
 
-#Data info
+# Data info
 input_size = args.input_size   #32 #256
 mean = [0.5, 0.5, 0.5]
 std  = [0.5, 0.5, 0.5]
 
-#Resnet18 model
+# Resnet18 model
 model = torchvision.models.resnet50(pretrained=True)
 
-#Remove fully connected layer
+# Remove fully connected layer
 modules = list(model.children())[:-1]
 
 #--------------------------------------------#
-from collections import OrderedDict
 
 class Flatten(nn.Module):
     def forward(self, input):
         return input.view(input.size(0), -1)
 #--------------------------------------------#
 
-#modules.append(nn.Flatten())
 modules.append(Flatten())
 model = nn.Sequential(*modules)
 
 kernel_weights_lr = args.learning_rate*1
-num_neighbours    = 200
-eval_interval     = args.update_interval
+num_neighbours = 200
+eval_interval = args.update_interval
 
-#Set GPU ID or 'cpu'
+# Set GPU ID or 'cpu'
 if args.gpu_id is None:
 	device = torch.device('cpu')
 else:
@@ -123,39 +102,26 @@ class HLoss(nn.Module):
         super(HLoss, self).__init__()
 
     def forward(self, x):
-        #print(x)
-        #b = F.softmax(x, dim=1) * F.log_softmax(x, dim=1)
         b = x*np.log(x)
         b = np.sum(b,axis=1)
-        #b = -1.0 * b.sum()
         b = -1.0 * b
         return b
 
-
 HLoss = HLoss()
-
-"""
-Set up DataLoaders
-"""
 
 #Transformations/pre-processing operations
 train_transforms = transforms.Compose([
         transforms.Resize((input_size,input_size)),
-#        transforms.RandomCrop(32, padding=4),
-#        transforms.RandomCrop((32,32)),
-#        ag.AutoAugment(),
-#        ag.Cutout(),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize(mean, std)])
 
 update_transforms = transforms.Compose([
         transforms.Resize((input_size,input_size)),
-#        transforms.CenterCrop((input_size,input_size)),
         transforms.ToTensor(),
         transforms.Normalize(mean, std)])
 
-
+# Load datasets
 train_dataset  = MultiFolderLoader(args.data_dir, train_transforms, num_classes = args.num_classes, start_indx = 0, img_type = "."+args.im_ext, ret_class=True)
 update_dataset = MultiFolderLoader(args.data_dir, update_transforms, num_classes = args.num_classes, start_indx = 0, img_type = "."+args.im_ext, ret_class=True)
 unlabels_dataset = MultiFolderLoader(args.unlabels, train_transforms, num_classes = args.num_classes, start_indx = 0, img_type = "."+args.im_ext, ret_class=True)
@@ -167,12 +133,7 @@ update_loader = DataLoader(update_dataset, batch_size=args.batch_size, shuffle=F
 unlabels_loader = DataLoader(unlabels_dataset, batch_size=args.batch_size, shuffle=False, num_workers=3)
 test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=3)
 
-"""
-Create Gaussian kernel classifier
-"""
 model = model.to(device)
-#best_state = model.to(device)
-#model = model.train()
 model = model.eval()
 
 def update_centres():
@@ -226,19 +187,13 @@ centre_labels = torch.LongTensor(update_dataset.get_all_labels()).to(device)
 kernel_classifier = GaussianKernels(args.num_classes, num_neighbours, num_train, args.sigma)
 kernel_classifier = kernel_classifier.to(device)
 
-
-"""
-Set up loss and optimiser
-"""
-
+# Set up loss and optimiser
 criterion = nn.NLLLoss()
 
 optimiser = optim.Adam([
                 {'params': model.parameters()},
                 {'params': kernel_classifier.parameters(), 'lr': kernel_weights_lr}
             ], lr=args.learning_rate)
-
-#exp_lr_scheduler = optim.lr_scheduler.StepLR(optimiser, step_size=step_size, gamma=step_gamma)
 
 ##################################################### MIXUP #######################################################
 
@@ -402,56 +357,6 @@ centres = update_centres()
 print("Best ACC_Teste_train::  "+str(acc_geral)+ "  best_epoch::  "+str(best_epoch)+ "\n")
 result_model.append("============================= \n")
 result_model.append("Best ACC_Teste_train::  "+str(acc_geral)+ "  best_epoch::  "+str(best_epoch)+ "\n")
-
-#save_model()
-"""
-def MCScore(log_prob):
-  top2 = torch.topk(log_prob, k=2, dim=1).values[:,1]
-  top1 = torch.topk(log_prob, k=2, dim=1).values[:,0]
-  score_c = (top2 - top1) / torch.sum(log_prob,dim=1)
-  return score_c
-
-def TopK(final_dist,label_l,true_labels, k):
-  final_dist = np.squeeze(np.array(final_dist))
-  k = 20
-  freq = np.zeros(100)
-  topk = np.sort(final_dist)[0:k] # select top k
-
-  for i in range(topk.shape[0]):
-     pos = np.where(topk[i]==final_dist)[0]
-     freq[label_l[pos]] += 1
-
-  final_index = np.argmax(freq)
-  return  final_index
-
-def pairwise_distances_(feature_u, img_u, label_u, feature_l, img_l, label_l, true_labels):
-  labels = []
-  correct = 0
-  erro = 0
-
-  dist_matrix_1 = pairwise_distances(np.array([feature_u]),feature_l , metric = 'euclidean')  #dist_matrix_1.shape(1,5000)
-  dist_matrix_scaler_1 = (dist_matrix_1 - dist_matrix_1.min()) / (dist_matrix_1.max() - dist_matrix_1.min())
-
-  dist_matrix_4 = pairwise_distances(np.array([feature_u]),feature_l , metric = 'chebyshev')
-  dist_matrix_scaler_4 = (dist_matrix_4 - dist_matrix_4.min()) / (dist_matrix_4.max() - dist_matrix_4.min())
-
-  dist_matrix_5 = pairwise_distances(np.array([feature_u]),feature_l , metric = 'cityblock')
-  dist_matrix_scaler_5 = (dist_matrix_5 - dist_matrix_5.min()) / (dist_matrix_5.max() - dist_matrix_5.min())
-
-  final_dist = (1+dist_matrix_scaler_1) * (1+dist_matrix_scaler_5) * (1+dist_matrix_scaler_4)
-  
-  k = args.topk
-  final_index = TopK(final_dist,label_l, true_labels,k)
-
-  if(true_labels == final_index): #label_l[final_index]):
-    correct = correct +1;
-  else:
-    erro = erro + 1
-
-  return correct,erro
-"""
-print("########################################################################################")
-print("########################################################################################")
 
 ############################ Load best state model ######################################
 model.load_state_dict(torch.load(args.save_dir + "/"+seed+"model.pt",map_location=device))
