@@ -1,5 +1,4 @@
 import io
-import accimage
 import h5py
 from PIL import Image
 
@@ -10,12 +9,6 @@ class ImageLoaderPIL(object):
         with path.open('rb') as f:
             with Image.open(f) as img:
                 return img.convert('RGB')
-
-class ImageLoaderAccImage(object):
-
-    def __call__(self, path):
-        return accimage.Image(str(path))
-
 
 class VideoLoader(object):
 
