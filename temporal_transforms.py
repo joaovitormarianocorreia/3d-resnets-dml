@@ -56,3 +56,29 @@ class TemporalRandomCrop(object):
 
         return out
 
+class TemporalEvenCrop(object):
+
+    def __init__(self, size, n_samples=1):
+        self.size = size
+        self.n_samples = n_samples
+        self.loop = LoopPadding(size)
+
+    def __call__(self, frame_indices):
+        n_frames = len(frame_indices)
+        stride = max(
+            1, math.ceil((n_frames - 1 - self.size) / (self.n_samples - 1)))
+
+        out = []
+        for begin_index in frame_indices[::stride]:
+            if len(out) >= self.n_samples:
+                break
+            end_index = min(frame_indices[-1] + 1, begin_index + self.size)
+            sample = list(range(begin_index, end_index))
+
+            if len(sample) < self.size:
+                out.append(self.loop(sample))
+                break
+            else:
+                out.append(sample)
+
+        return out
