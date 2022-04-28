@@ -51,7 +51,7 @@ def parse_opts():
     parser.add_argument('--sample_duration', default=16, type=int, help='Temporal duration of inputs')
     parser.add_argument('--video_path', default=None, type=Path, help='Directory path of videos')
     parser.add_argument('--annotation_path', default=None, type=Path, help='Annotation file path')
-    parser.add_argument('--batch_size', default=32, type=int, help='Batch Size')
+    parser.add_argument('--batch_size', default=16, type=int, help='Batch Size')
     parser.add_argument('--result_path', default=None, type=Path, help='Result directory path')
     
     return parser.parse_args()
@@ -81,9 +81,7 @@ if __name__ == '__main__':
 
     pretrain = torch.load(pretrain_path, map_location='cpu')
     model.load_state_dict(pretrain['state_dict'])
-    tmp_model = model
-    tmp_model.fc = nn.Linear(tmp_model.fc.in_features, opt.n_classes)
-    model = tmp_model
+    model = model.to(device)
 
     # set up spatial transforms to data
     spatial_transform = transforms.Compose([
@@ -112,7 +110,7 @@ if __name__ == '__main__':
         model.parameters(),
         lr=0.1)
 
-    criterion = CrossEntropyLoss()#.to(device)
+    criterion = CrossEntropyLoss().to(device)
 
     # set multistep milestones 
     scheduler = lr_scheduler.MultiStepLR(optimizer, [50, 100, 150]) 
@@ -133,7 +131,8 @@ if __name__ == '__main__':
 
         for i, data in enumerate(train_loader):
             inputs, targets = data
-            targets = targets#.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
+            inputs = inputs.to(device)
             outputs = model(inputs)
             loss = criterion(outputs, targets)
             
@@ -148,7 +147,7 @@ if __name__ == '__main__':
 
                 acc = n_correct_elems / batch_size
 
-            print(f'Accuracy: {acc}')
+                print(f'Accuracy: {acc}')
 
 
             optimizer.zero_grad()
