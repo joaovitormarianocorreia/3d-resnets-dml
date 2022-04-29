@@ -51,13 +51,16 @@ def parse_opts():
     parser.add_argument('--sample_duration', default=16, type=int, help='Temporal duration of inputs')
     parser.add_argument('--video_path', default=None, type=Path, help='Directory path of videos')
     parser.add_argument('--annotation_path', default=None, type=Path, help='Annotation file path')
-    parser.add_argument('--batch_size', default=16, type=int, help='Batch Size')
+    parser.add_argument('--batch_size', default=8, type=int, help='Batch Size')
     parser.add_argument('--result_path', default=None, type=Path, help='Result directory path')
     
     return parser.parse_args()
 
 
 if __name__ == '__main__':
+
+    torch.cuda.empty_cache()
+
     # import options arguments
     opt = parse_opts()
 
@@ -148,7 +151,6 @@ if __name__ == '__main__':
                 acc = n_correct_elems / batch_size
 
                 print(f'Accuracy: {acc}')
-
 
             optimizer.zero_grad()
             loss.backward()
