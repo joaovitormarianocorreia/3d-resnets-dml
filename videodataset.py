@@ -156,6 +156,9 @@ class VideoDataset(data.Dataset):
     def __len__(self):
         return len(self.data)
 
+    def get_all_labels(self):
+        return list(map(int, self.class_names))
+
 
 class VideoDatasetMultiClips(VideoDataset):
 
