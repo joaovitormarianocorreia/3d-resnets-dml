@@ -17,7 +17,7 @@ def update_centres(model, device, batch_size, centres, data_loader):
 
 	with torch.no_grad():
 		for i, data in enumerate(data_loader, 0):
-			inputs, labels, indices = data
+			inputs, labels = data
 			inputs = inputs.to(device)
 			extracted_features = model(inputs)
 			idx = i * batch_size
