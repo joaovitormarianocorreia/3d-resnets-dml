@@ -1,3 +1,4 @@
 data/**
 __pycache__/**
 __pycache__/resnet.cpython-38.pyc
+runs/**
