@@ -6,8 +6,10 @@ import torch.utils.data as data
 from pathlib import Path
 from loader import VideoLoader
 
-
 def get_class_labels(data):
+    """
+    Create and return a map with classes labels
+    """
     class_labels_map = {}
     index = 0
     for class_label in data['labels']:
@@ -17,6 +19,10 @@ def get_class_labels(data):
 
 
 def get_database(data, subset, root_path, video_path_formatter):
+    """
+    Get video IDs, Paths and other annotations data and return in a list
+    """
+
     video_ids = []
     video_paths = []
     annotations = []
@@ -37,21 +43,20 @@ def get_database(data, subset, root_path, video_path_formatter):
 
 class VideoDataset(data.Dataset):
 
-    def __init__(self,
-                 root_path, 
-                 annotation_path,
-                 subset,
-                 spatial_transform=None,
-                 temporal_transform=None,
-                 target_transform=None,
-                 video_loader=None,
-                 video_path_formatter=(lambda root_path, label, video_id:
-                                       root_path / label / video_id),
-                 image_name_formatter=lambda x: f'image_{x:05d}.jpg',
-                 target_type='label'):
-        self.data, self.class_names = self.__make_dataset(
-            root_path, annotation_path, subset, video_path_formatter)
+    def __init__(
+                self,
+                root_path, 
+                annotation_path,
+                subset,
+                spatial_transform = None,
+                temporal_transform = None,
+                target_transform = None,
+                video_loader = None,
+                video_path_formatter = (lambda root_path, label, video_id: root_path / label / video_id),
+                image_name_formatter = lambda x: f'image_{x:05d}.jpg',
+                target_type = 'label'):
 
+        self.data, self.class_names = self.__make_dataset(root_path, annotation_path, subset, video_path_formatter)
         self.spatial_transform = spatial_transform
         self.temporal_transform = temporal_transform
         self.target_transform = target_transform
@@ -63,23 +68,31 @@ class VideoDataset(data.Dataset):
 
         self.target_type = target_type
 
-    def __make_dataset(self, root_path, annotation_path, subset,
-                       video_path_formatter):
+    def __make_dataset(
+                self, 
+                root_path,
+                annotation_path,
+                subset,
+                video_path_formatter):
+
+        # open json file with annotation of the dataset
         with annotation_path.open('r') as f:
             data = json.load(f)
-        video_ids, video_paths, annotations = get_database(
-            data, subset, root_path, video_path_formatter)
+        
+        # get video ids, paths, classes and indexes from annotation file 
+        video_ids, video_paths, annotations = get_database(data, subset, root_path, video_path_formatter)
         class_to_idx = get_class_labels(data)
         idx_to_class = {}
+
+        # create dictionary of classes and labels
         for name, label in class_to_idx.items():
             idx_to_class[label] = name
 
+        # create dataset 
         n_videos = len(video_ids)
         dataset = []
         for i in range(n_videos):
-            if i % (n_videos // 5) == 0:
-                print('dataset loading [{}/{}]'.format(i, len(video_ids)))
-
+            # define label of the video, if not exists then it's test
             if 'label' in annotations[i]:
                 label = annotations[i]['label']
                 label_id = class_to_idx[label]
@@ -87,10 +100,12 @@ class VideoDataset(data.Dataset):
                 label = 'test'
                 label_id = -1
 
+            # load video path
             video_path = video_paths[i]
             if not video_path.exists():
                 continue
 
+            # add segment (number of frames)
             segment = annotations[i]['segment']
             if segment[1] == 1:
                 continue
@@ -108,7 +123,9 @@ class VideoDataset(data.Dataset):
         return dataset, idx_to_class
 
     def __loading(self, path, frame_indices):
+        
         clip = self.loader(path, frame_indices)
+        
         if self.spatial_transform is not None:
             clip = [self.spatial_transform(img) for img in clip]
         clip = torch.stack(clip, 0).permute(1, 0, 2, 3)
@@ -116,13 +133,16 @@ class VideoDataset(data.Dataset):
         return clip
 
     def __getitem__(self, index):
+        
         path = self.data[index]['video']
+
         if isinstance(self.target_type, list):
             target = [self.data[index][t] for t in self.target_type]
         else:
             target = self.data[index][self.target_type]
 
         frame_indices = self.data[index]['frame_indices']
+
         if self.temporal_transform is not None:
             frame_indices = self.temporal_transform(frame_indices)
 
