@@ -106,35 +106,6 @@ if __name__ == '__main__':
         train_data,
         batch_size = opt.batch_size)
 
-	###############
-
-    num_train = len(train_loader.dataset)
-    
-    with torch.no_grad():
-        num_dims = model(torch.randn(1, 3, opt.input_size, opt.input_size).to(device)).size(1)
-    
-    num_neighbours = 200
-
-	# create tensor to store kernel centres
-    centres = torch.zeros(num_train, num_dims).type(torch.FloatTensor).to(device)
-    print("Size of centres is {0}".format(centres.size()))
-
-	# create tensor to store labels of centres
-    centre_labels = torch.LongTensor(train_data.get_all_labels()).to(device)
-
-	# create gaussian kernel classifier
-    kernel_classifier = mixup.GaussianKernels(opt.num_classes, num_neighbours, num_train, opt.sigma)
-    kernel_classifier = kernel_classifier.to(device)
-
-    optimiser = Adam([
-        {'params': model.parameters()},
-        {'params': kernel_classifier.parameters(), 'lr': 0.1}], 
-		lr = 0.1)
-    
-    criterion_mixup = nn.CrossEntropyLoss()
-
-    ###############
-
     # set optimizer and scheduler
     optimizer = SGD(
         model.parameters(),
@@ -152,14 +123,6 @@ if __name__ == '__main__':
 
         model.train()
 
-        if (epoch % opt.update_interval) == 0:
-            print("Updating kernel centres...")
-            centres = mixup.update_centres()
-            print("Finding training set neighbours...")
-            centres = centres.cpu()
-            neighbours_tr = mixup.find_neighbours( num_neighbours, centres )
-            centres = centres.to(device)
-
         # get the current learning reate
         lrs = []
         for param_group in optimizer.param_groups:
@@ -171,17 +134,11 @@ if __name__ == '__main__':
             # setting inputs and targets
             inputs, targets = data
             targets = targets.to(device, non_blocking=True)
-            
-            # mixup
-            inputs_mixup, targets_a, targets_b, lam = mixup.mixup_data(inputs, targets, 1, True)
-            inputs_mixup, targets_a, targets_b = map(Variable, (inputs_mixup,targets_a, targets_b))
-            outputs_mixup, outputs_2 = kernel_classifier( model(inputs_mixup), centres, centre_labels, neighbours_tr[indices, :] )
-            loss_mixup = mixup.mixup_criterion(criterion_mixup, outputs_mixup, targets_a, targets_b, lam)
-            
+
             inputs = inputs.to(device)
             outputs = model(inputs)
             loss = criterion(outputs, targets)
-            
+
             # calculate accuracy
             with torch.no_grad():
                 batch_size = targets.size(0)
@@ -193,7 +150,8 @@ if __name__ == '__main__':
 
                 acc = n_correct_elems / batch_size
 
-                print(f'Accuracy: {acc}')
+            # print metrics at end
+            print(f'| Epoch [{epoch}] | Batch Id [{i} / {len(train_loader)}] | Loss [{loss}] | Accuracy [{acc}] |')
 
             optimizer.zero_grad()
             loss.backward()
