@@ -12,6 +12,7 @@ from torchvision.transforms import transforms
 from temporal_transforms import Compose as TemporalCompose, TemporalRandomCrop
 from loader import VideoLoader
 from videodataset import VideoDataset
+from model import get_fine_tuning_parameters
 
 def image_name_formatter(x):
     return f'image_{x:05d}.jpg'
@@ -42,7 +43,7 @@ def parse_opts():
     parser.add_argument('--model_depth', default=50, type=int, help='Depth of resnet (10 | 18 | 34 | 50 | 101)')
     parser.add_argument('--n_classes', default=51, type=int, help= 'Number of classes (activitynet: 200, kinetics: 400 or 600, ucf101: 101, hmdb51: 51)')
     parser.add_argument('--n_epochs', default=200, type=int, help= 'Number of epochs')
-    parser.add_argument('--batch_size', default=8, type=int, help='Batch Size')
+    parser.add_argument('--batch_size', default=16, type=int, help='Batch Size')
     parser.add_argument('--n_input_channels', default=3, type=int, help='Number of channels on input')
     parser.add_argument('--resnet_shortcut', default='B', type=str, help='Shortcut type of resnet (A | B)')
     parser.add_argument('--conv1_t_size', default=7, type=int, help='Kernel size in t dim of conv1.')
@@ -53,6 +54,7 @@ def parse_opts():
     parser.add_argument('--sample_duration', default=16, type=int, help='Temporal duration of inputs')
     parser.add_argument('--video_path', default=None, type=Path, help='Directory path of videos')
     parser.add_argument('--annotation_path', default=None, type=Path, help='Annotation file path')
+    parser.add_argument('--ft_begin_module', default='',type=str, help=('Module name of beginning of fine-tuning (conv1, layer1, fc, denseblock1, classifier, ...). The default means all layers are fine-tuned.'))
     
     return parser.parse_args()
 
@@ -79,11 +81,16 @@ if __name__ == '__main__':
         widen_factor = opt.resnet_widen_factor)
 
     # loading pretrained model
+    print('Loading pretrained model\n')
     pretrain_path = './data/pretrained/r3d50_KMS_200ep.pth'
     pretrain = torch.load(pretrain_path, map_location='cpu')
     model.load_state_dict(pretrain['state_dict'])
+    model.fc = nn.Linear(2048, 51)
+    print(model)
     model = model.to(device)
 
+    parameters = get_fine_tuning_parameters(model, opt.ft_begin_module)
+    
     # set up spatial transforms to data
     spatial_transform = transforms.Compose([
         transforms.Resize(opt.sample_size),
@@ -97,6 +104,7 @@ if __name__ == '__main__':
     # set up temporal transforms to data
     temporal_transform = TemporalCompose([TemporalRandomCrop(opt.sample_duration)])
 
+    print('Loading dataset\n')
     # get training data
     train_data = get_training_data(opt.video_path, opt.annotation_path, spatial_transform, temporal_transform)
     train_sampler = None
@@ -108,7 +116,7 @@ if __name__ == '__main__':
 
     # set optimizer and scheduler
     optimizer = SGD(
-        model.parameters(),
+        parameters,
         lr = 0.1)
 
     criterion = CrossEntropyLoss().to(device)
@@ -151,7 +159,7 @@ if __name__ == '__main__':
                 acc = n_correct_elems / batch_size
 
             # print metrics at end
-            print(f'| Epoch [{epoch}] | Batch Id [{i} / {len(train_loader)}] | Loss [{loss}] | Accuracy [{acc}] |')
+            print('| Epoch [{0}] | Batch Id [{1:03d}/{2}] | Loss [{3:03.6f}] | Accuracy [{4:02.6f}] |'.format(epoch, i, len(train_loader), loss, acc))
 
             optimizer.zero_grad()
             loss.backward()
