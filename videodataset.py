@@ -157,7 +157,11 @@ class VideoDataset(data.Dataset):
         return len(self.data)
 
     def get_all_labels(self):
-        return list(map(int, self.class_names))
+        targets = []
+        for i in range(len(self.data)):
+            targets.append(self.data[i]['label'])
+
+        return targets
 
 
 class VideoDatasetMultiClips(VideoDataset):
