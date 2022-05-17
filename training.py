@@ -1,8 +1,9 @@
+from urllib import response
+from sklearn.utils import shuffle
 import torch
 import argparse
 import resnet
 import torch.nn as nn
-import mixup
 
 from torch.nn import CrossEntropyLoss
 from torch.optim import SGD, Adam, lr_scheduler
@@ -13,6 +14,7 @@ from temporal_transforms import Compose as TemporalCompose, TemporalRandomCrop
 from loader import VideoLoader
 from videodataset import VideoDataset
 from model import get_fine_tuning_parameters
+from classifier import GaussianKernels, find_neighbours
 
 def image_name_formatter(x):
     return f'image_{x:05d}.jpg'
@@ -55,8 +57,41 @@ def parse_opts():
     parser.add_argument('--video_path', default=None, type=Path, help='Directory path of videos')
     parser.add_argument('--annotation_path', default=None, type=Path, help='Annotation file path')
     parser.add_argument('--ft_begin_module', default='',type=str, help=('Module name of beginning of fine-tuning (conv1, layer1, fc, denseblock1, classifier, ...). The default means all layers are fine-tuned.'))
-    
+    # gaussian kernel classifier
+    parser.add_argument('--sigma', default=10, type=int, help='Gaussian sigma.')
+    parser.add_argument('--num_neighbours', default=200, type=int, help='Number of Gaussian Kernel Classifier neighbours.')
+    parser.add_argument('--update_interval', default=5, type=int, help='Stored centres/neighbours are updated every update_interval epochs.')
+
+
     return parser.parse_args()
+
+def update_centres(centres, model, update_loader, batch_size):
+
+	# disable dropout, use global stats for batchnorm
+	model.eval()
+
+	# disable learning
+	with torch.no_grad():
+
+		# update stored centres
+		for i, data in enumerate(update_loader, 0):
+
+			# get the inputs; data is a list of [inputs, labels]. Send to GPU
+			inputs, labels, index = data
+			inputs = inputs.to(device)
+
+			# extract features for batch
+			extracted_features = model(inputs)
+
+			# save to centres tensor
+			idx = i*batch_size
+			centres[idx:idx + extracted_features.shape[0], :] = extracted_features
+
+	#model.train()
+	model.eval()
+
+	return centres
+
 
 
 if __name__ == '__main__':
@@ -85,84 +120,126 @@ if __name__ == '__main__':
     pretrain_path = './data/pretrained/r3d50_KMS_200ep.pth'
     pretrain = torch.load(pretrain_path, map_location='cpu')
     model.load_state_dict(pretrain['state_dict'])
-    model.fc = nn.Linear(2048, 51)
-    print(model)
+
+    modules = list(model.children())[:-1]
+    modules.append(nn.Flatten())
+    model = nn.Sequential(*modules)
     model = model.to(device)
 
-    parameters = get_fine_tuning_parameters(model, opt.ft_begin_module)
+    # parameters = get_fine_tuning_parameters(model, opt.ft_begin_module)
     
     # set up spatial transforms to data
     spatial_transform = transforms.Compose([
         transforms.Resize(opt.sample_size),
         transforms.CenterCrop(opt.sample_size),
         transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(),        
+        transforms.ColorJitter(),
         transforms.ToTensor(),
         transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
     ])
 
+    update_transform = transforms.Compose([
+        transforms.Resize(opt.sample_size),
+        transforms.CenterCrop(opt.sample_size),
+        transforms.ToTensor(),
+        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])])
+
     # set up temporal transforms to data
     temporal_transform = TemporalCompose([TemporalRandomCrop(opt.sample_duration)])
 
-    print('Loading dataset\n')
+    print('\nLoading data')
+
     # get training data
     train_data = get_training_data(opt.video_path, opt.annotation_path, spatial_transform, temporal_transform)
-    train_sampler = None
+
+    update_data = get_training_data(opt.video_path, opt.annotation_path, update_transform, temporal_transform)
 
     # set train loader
     train_loader = torch.utils.data.DataLoader(
         train_data,
-        batch_size = opt.batch_size)
+        batch_size = opt.batch_size,
+        shuffle = True
+    )
 
-    # set optimizer and scheduler
-    optimizer = SGD(
-        parameters,
-        lr = 0.1)
+    update_loader = torch.utils.data.DataLoader(
+        update_data, 
+        batch_size = opt.batch_size,
+        shuffle = False
+    )
 
-    criterion = CrossEntropyLoss().to(device)
+    num_train = len(update_loader.dataset)
+    print(f'\nNum Train: {num_train}')
 
-    # set multistep milestones 
-    scheduler = lr_scheduler.MultiStepLR(optimizer, [50, 100, 150]) 
+    with torch.no_grad():
+        num_dims = model(torch.randn(16, 3, 16, opt.sample_size, opt.sample_size).to(device)).size(1)
+    print(f'\nNum Dims: {num_dims}')
 
-    # begin training loop
+    # create tensor to store kernel centres 
+    centres = torch.zeros(num_train, num_dims).type(torch.FloatTensor).to(device)
+    print(f'\nSize of centres: {centres.size()}')
+
+    # create tensor to store labels of centres
+    centre_labels = torch.LongTensor(update_data.get_all_labels()).to(device)
+    print(f'\nCentre labels: {centre_labels}')
+
+    # create Gaussian Kernel Classifier
+    kernel_classifier = GaussianKernels(opt.n_classes, opt.num_neighbours, num_train, opt.sigma)
+    kernel_classifier = kernel_classifier.to(device)
+
+    # set optimizer, loss and scheduler
+    optimizer = Adam(
+        [
+            {'params': model.parameters()},
+            {'params': kernel_classifier.parameters(), 'lr':  0.1}
+        ], lr = 0.1)
+
+    criterion = nn.NLLLoss().to(device)
+
+    # scheduler = lr_scheduler.MultiStepLR(optimizer, [50, 100, 150]) # set multistep milestones 
+
+    # begin of the training loop
+    print('\nBegin Training\n')
     for epoch in range(opt.n_epochs):
         
-        print('train at epoch {}'.format(epoch))
+        print('Train at epoch {}'.format(epoch))
 
         model.train()
 
-        # get the current learning reate
-        lrs = []
-        for param_group in optimizer.param_groups:
-            lr = float(param_group['lr'])
-            lrs.append(lr)
-        current_lr = max(lrs)
+        if (epoch % opt.update_interval) == 0:
+            print('\tUpdating kernel centres')
+            centres = update_centres(centres, model, update_loader, opt.batch_size)
+            print('\tFinding training set neighbours')
+            centres = centres.cpu()
+            neighbours_tr = find_neighbours(opt.num_neighbours, centres )
+            centres = centres.to(device)
+            print('\tFinished update')
 
-        for i, data in enumerate(train_loader):
+        running_loss = 0.0
+        running_correct = 0
+
+        for i, data in enumerate(train_loader, 0):
             # setting inputs and targets
-            inputs, targets = data
-            targets = targets.to(device, non_blocking=True)
-
+            inputs, labels, index = data
             inputs = inputs.to(device)
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-
-            # calculate accuracy
-            with torch.no_grad():
-                batch_size = targets.size(0)
-
-                _, pred = outputs.topk(1, 1, largest=True, sorted=True)
-                pred = pred.t()
-                correct = pred.eq(targets.view(1, -1))
-                n_correct_elems = correct.float().sum().item()
-
-                acc = n_correct_elems / batch_size
-
-            # print metrics at end
-            print('| Epoch [{0}] | Batch Id [{1:03d}/{2}] | Loss [{3:03.6f}] | Accuracy [{4:02.6f}] |'.format(epoch, i, len(train_loader), loss, acc))
+            labels = labels.to(device, non_blocking=True).view(-1)
+            index = index.to(device)
 
             optimizer.zero_grad()
+
+            log_prob = kernel_classifier(model(inputs), centres, centre_labels, neighbours_tr[index,:])
+            loss = criterion(log_prob, labels)
             loss.backward()
             optimizer.step()
 
-        scheduler.step()
+            running_loss += loss.item()
+
+            pred = log_prob.argmax(dim=1, keepdim=True) 
+            correct = pred.eq(labels.view_as(pred)).sum().item()
+            running_correct += correct
+
+        acc = 100. * running_correct / len(train_loader.dataset)
+        print(f'| Epoch [{epoch}] | Loss [{loss}] | Accuracy [{acc}] |')
+
+    print("Updating kernel centres (final time).")
+    centres = update_centres(centres, model, update_loader, opt.batch_size)
+
