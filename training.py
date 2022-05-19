@@ -4,6 +4,7 @@ import torch
 import argparse
 import resnet
 import torch.nn as nn
+import numpy as np
 
 from torch.nn import CrossEntropyLoss
 from torch.optim import SGD, Adam, lr_scheduler
@@ -16,8 +17,10 @@ from videodataset import VideoDataset
 from model import get_fine_tuning_parameters
 from classifier import GaussianKernels, find_neighbours
 
+
 def image_name_formatter(x):
     return f'image_{x:05d}.jpg'
+
 
 def get_training_data(video_path, annotation_path, spatial_transform=None, temporal_transform=None, target_transform=None):
     
@@ -40,12 +43,13 @@ def get_training_data(video_path, annotation_path, spatial_transform=None, tempo
 
     return training_data
 
+
 def parse_opts():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_depth', default=50, type=int, help='Depth of resnet (10 | 18 | 34 | 50 | 101)')
     parser.add_argument('--n_classes', default=51, type=int, help= 'Number of classes (activitynet: 200, kinetics: 400 or 600, ucf101: 101, hmdb51: 51)')
     parser.add_argument('--n_epochs', default=200, type=int, help= 'Number of epochs')
-    parser.add_argument('--batch_size', default=16, type=int, help='Batch Size')
+    parser.add_argument('--batch_size', default=4, type=int, help='Batch Size')
     parser.add_argument('--n_input_channels', default=3, type=int, help='Number of channels on input')
     parser.add_argument('--resnet_shortcut', default='B', type=str, help='Shortcut type of resnet (A | B)')
     parser.add_argument('--conv1_t_size', default=7, type=int, help='Kernel size in t dim of conv1.')
@@ -61,9 +65,13 @@ def parse_opts():
     parser.add_argument('--sigma', default=10, type=int, help='Gaussian sigma.')
     parser.add_argument('--num_neighbours', default=200, type=int, help='Number of Gaussian Kernel Classifier neighbours.')
     parser.add_argument('--update_interval', default=5, type=int, help='Stored centres/neighbours are updated every update_interval epochs.')
-
+    # mixup
+    parser.add_argument('--alpha', default=1, type=float,help='mixup interpolation coefficient (default: 1)')
+    parser.add_argument('--scale_mixup', default=0.0001, type=float,help='scaling the mixup loss')
+    parser.add_argument('--beta', default=1, type=float,help='scaling the gauss loss')
 
     return parser.parse_args()
+
 
 def update_centres(centres, model, update_loader, batch_size):
 
@@ -93,6 +101,28 @@ def update_centres(centres, model, update_loader, batch_size):
 	return centres
 
 
+def mixup_data(x, y, device, alpha=1.0):
+    """
+    Return mixed inputs, pair of targets and lambda
+    """
+    if (alpha > 0):
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+
+    batch_size = x.size()[0]
+
+    index = torch.randperm(batch_size).to(device)
+
+    mixed_x = lam * x + (1-lam)*x[index, :]
+    y_a, y_b = y, y[index]
+    
+    return mixed_x, y_a, y_b, lam
+
+
+def mixup_criterion(criterion, pred, y_a, y_b, lam):
+    return lam * criterion(pred, y_a) + (1-lam) * criterion(pred, y_b)
+
 
 if __name__ == '__main__':
     # clean the cache memory before training
@@ -116,7 +146,7 @@ if __name__ == '__main__':
         widen_factor = opt.resnet_widen_factor)
 
     # loading pretrained model
-    print('Loading pretrained model\n')
+    print('\nLoading pretrained model\n')
     pretrain_path = './data/pretrained/r3d50_KMS_200ep.pth'
     pretrain = torch.load(pretrain_path, map_location='cpu')
     model.load_state_dict(pretrain['state_dict'])
@@ -197,6 +227,9 @@ if __name__ == '__main__':
 
     # scheduler = lr_scheduler.MultiStepLR(optimizer, [50, 100, 150]) # set multistep milestones 
 
+    # mixup criterion 
+    criterion_mixup = nn.CrossEntropyLoss()
+
     # begin of the training loop
     print('\nBegin Training\n')
     for epoch in range(opt.n_epochs):
@@ -212,7 +245,6 @@ if __name__ == '__main__':
             centres = centres.cpu()
             neighbours_tr = find_neighbours(opt.num_neighbours, centres )
             centres = centres.to(device)
-            print('\tFinished update')
 
         running_loss = 0.0
         running_correct = 0
@@ -223,6 +255,12 @@ if __name__ == '__main__':
             inputs = inputs.to(device)
             labels = labels.to(device, non_blocking=True).view(-1)
             index = index.to(device)
+
+            # mixup data
+            inputs_mixup, targets_a, targets_b, lam = mixup_data(inputs, labels, device, opt.alpha)
+            inputs_mixup, targets_a, targets_b = map(Variable, (inputs_mixup, targets_a, targets_b))
+            outputs_mixup = kernel_classifier( model(inputs_mixup), centres, centre_labels, neighbours_tr[index, :] )
+            loss_mixup = mixup_criterion(criterion_mixup, outputs_mixup, targets_a, targets_b, lam)
 
             optimizer.zero_grad()
 
