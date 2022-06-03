@@ -66,9 +66,9 @@ def class_process(class_dir_path, dst_root_path, ext, fps=-1, size=240):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('dir_path', default=None, type=Path, help='Directory path of videos')
-    parser.add_argument('dst_path', default=None, type=Path, help='Directory path of jpg videos')
-    parser.add_argument('dataset', default='', type=str, help='Dataset name (kinetics | mit | ucf101 | hmdb51 | activitynet)')
+    parser.add_argument('--dir_path', default='../data/hmdb/mp4', type=Path, help='Directory path of videos')
+    parser.add_argument('--dst_path', default='../data/hmdb/jpg', type=Path, help='Directory path of jpg videos')
+    parser.add_argument('--dataset', default='hmdb51', type=str, help='Dataset name (kinetics | mit | ucf101 | hmdb51 | activitynet)')
     parser.add_argument('--n_jobs', default=-1, type=int, help='Number of parallel jobs')
     parser.add_argument('--fps', default=-1, type=int, help=('Frame rates of output videos. -1 means original frame rates.'))
     parser.add_argument('--size', default=240, type=int, help='Frame size of output videos.')
