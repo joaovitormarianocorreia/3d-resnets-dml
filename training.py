@@ -6,6 +6,7 @@ import resnet
 import torch.nn as nn
 import numpy as np
 
+from tqdm import tqdm
 from torch.nn import CrossEntropyLoss
 from torch.optim import SGD, Adam, lr_scheduler
 from torch.autograd import Variable
@@ -58,8 +59,8 @@ def parse_opts():
     parser.add_argument('--resnet_widen_factor', default=1.0, type=float, help='The number of feature maps of resnet is multiplied by this value')
     parser.add_argument('--sample_size', default=112, type=int, help='Height and width of inputs')
     parser.add_argument('--sample_duration', default=16, type=int, help='Temporal duration of inputs')
-    parser.add_argument('--video_path', default=None, type=Path, help='Directory path of videos')
-    parser.add_argument('--annotation_path', default=None, type=Path, help='Annotation file path')
+    parser.add_argument('--video_path', default='./data/hmdb/jpg', type=Path, help='Directory path of videos')
+    parser.add_argument('--annotation_path', default='./data/hmdb/json/hmdb51_1.json', type=Path, help='Annotation file path')
     parser.add_argument('--ft_begin_module', default='',type=str, help=('Module name of beginning of fine-tuning (conv1, layer1, fc, denseblock1, classifier, ...). The default means all layers are fine-tuned.'))
     # gaussian kernel classifier
     parser.add_argument('--sigma', default=10, type=int, help='Gaussian sigma.')
@@ -87,7 +88,7 @@ def update_centres(centres, model, update_loader, batch_size):
 			# get the inputs; data is a list of [inputs, labels]. Send to GPU
 			inputs, labels, index = data
 			inputs = inputs.to(device)
-
+    
 			# extract features for batch
 			extracted_features = model(inputs)
 
@@ -95,8 +96,7 @@ def update_centres(centres, model, update_loader, batch_size):
 			idx = i*batch_size
 			centres[idx:idx + extracted_features.shape[0], :] = extracted_features
 
-	#model.train()
-	model.eval()
+	model.train()
 
 	return centres
 
@@ -234,7 +234,7 @@ if __name__ == '__main__':
     print('\nBegin Training\n')
     for epoch in range(opt.n_epochs):
         
-        print('Train at epoch {}'.format(epoch))
+        print(f'\nTrain at epoch {epoch}')
 
         model.train()
 
@@ -249,7 +249,7 @@ if __name__ == '__main__':
         running_loss = 0.0
         running_correct = 0
 
-        for i, data in enumerate(train_loader, 0):
+        for i, data in tqdm(enumerate(train_loader, 0)):
             # setting inputs and targets
             inputs, labels, index = data
             inputs = inputs.to(device)
@@ -259,7 +259,7 @@ if __name__ == '__main__':
             # mixup data
             inputs_mixup, targets_a, targets_b, lam = mixup_data(inputs, labels, device, opt.alpha)
             inputs_mixup, targets_a, targets_b = map(Variable, (inputs_mixup, targets_a, targets_b))
-            outputs_mixup = kernel_classifier( model(inputs_mixup), centres, centre_labels, neighbours_tr[index, :] )
+            outputs_mixup = kernel_classifier(model(inputs_mixup), centres, centre_labels, neighbours_tr[index, :])
             loss_mixup = mixup_criterion(criterion_mixup, outputs_mixup, targets_a, targets_b, lam)
 
             optimizer.zero_grad()
