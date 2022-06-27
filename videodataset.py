@@ -5,6 +5,7 @@ import torch.utils.data as data
 
 from pathlib import Path
 from loader import VideoLoader
+from torch.utils.data.dataloader import default_collate
 
 def get_class_labels(data):
     """
@@ -39,6 +40,20 @@ def get_database(data, subset, root_path, video_path_formatter):
                 video_paths.append(video_path_formatter(root_path, label, key))
 
     return video_ids, video_paths, annotations
+
+def collate_fn(batch):
+    batch_clips, batch_targets = zip(*batch)
+
+    batch_clips = [clip for multi_clips in batch_clips for clip in multi_clips]
+    batch_targets = [
+        target for multi_targets in batch_targets for target in multi_targets
+    ]
+
+    target_element = batch_targets[0]
+    if isinstance(target_element, int) or isinstance(target_element, str):
+        return default_collate(batch_clips), default_collate(batch_targets)
+    else:
+        return default_collate(batch_clips), batch_targets
 
 
 class VideoDataset(data.Dataset):

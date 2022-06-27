@@ -1,5 +1,3 @@
-from urllib import response
-from sklearn.utils import shuffle
 import torch
 import argparse
 import resnet
@@ -13,41 +11,16 @@ from torch.autograd import Variable
 from pathlib import Path
 from torchvision.transforms import transforms
 from temporal_transforms import Compose as TemporalCompose, TemporalRandomCrop
-from loader import VideoLoader
-from videodataset import VideoDataset
+
 from model import get_fine_tuning_parameters
 from classifier import GaussianKernels, find_neighbours
-
-
-def image_name_formatter(x):
-    return f'image_{x:05d}.jpg'
-
-
-def get_training_data(video_path, annotation_path, spatial_transform=None, temporal_transform=None, target_transform=None):
-    
-    loader = VideoLoader(image_name_formatter)
-
-    video_path_formatter = (
-        lambda root_path, 
-        label, 
-        video_id: root_path / label / video_id)
-   
-    training_data = VideoDataset(
-        video_path,
-        annotation_path,
-        'training',
-        spatial_transform = spatial_transform,
-        temporal_transform = temporal_transform,
-        target_transform = target_transform,
-        video_loader = loader,
-        video_path_formatter = video_path_formatter)
-
-    return training_data
+from mixup import update_centres, mixup_data, mixup_criterion
+from dataset import get_training_data
 
 
 def parse_opts():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_depth', default=50, type=int, help='Depth of resnet (10 | 18 | 34 | 50 | 101)')
+    parser.add_argument('--model_depth', default=18, type=int, help='Depth of resnet (10 | 18 | 34 | 50 | 101)')
     parser.add_argument('--n_classes', default=51, type=int, help= 'Number of classes (activitynet: 200, kinetics: 400 or 600, ucf101: 101, hmdb51: 51)')
     parser.add_argument('--n_epochs', default=200, type=int, help= 'Number of epochs')
     parser.add_argument('--batch_size', default=4, type=int, help='Batch Size')
@@ -58,7 +31,7 @@ def parse_opts():
     parser.add_argument('--no_max_pool', action='store_true', help='If true, the max pooling after conv1 is removed.')
     parser.add_argument('--resnet_widen_factor', default=1.0, type=float, help='The number of feature maps of resnet is multiplied by this value')
     parser.add_argument('--sample_size', default=112, type=int, help='Height and width of inputs')
-    parser.add_argument('--sample_duration', default=16, type=int, help='Temporal duration of inputs')
+    parser.add_argument('--sample_duration', default=30, type=int, help='Temporal duration of inputs')
     parser.add_argument('--video_path', default='./data/hmdb/jpg', type=Path, help='Directory path of videos')
     parser.add_argument('--annotation_path', default='./data/hmdb/json/hmdb51_1.json', type=Path, help='Annotation file path')
     parser.add_argument('--ft_begin_module', default='',type=str, help=('Module name of beginning of fine-tuning (conv1, layer1, fc, denseblock1, classifier, ...). The default means all layers are fine-tuned.'))
@@ -72,56 +45,6 @@ def parse_opts():
     parser.add_argument('--beta', default=1, type=float,help='scaling the gauss loss')
 
     return parser.parse_args()
-
-
-def update_centres(centres, model, update_loader, batch_size):
-
-	# disable dropout, use global stats for batchnorm
-	model.eval()
-
-	# disable learning
-	with torch.no_grad():
-
-		# update stored centres
-		for i, data in enumerate(update_loader, 0):
-
-			# get the inputs; data is a list of [inputs, labels]. Send to GPU
-			inputs, labels, index = data
-			inputs = inputs.to(device)
-    
-			# extract features for batch
-			extracted_features = model(inputs)
-
-			# save to centres tensor
-			idx = i*batch_size
-			centres[idx:idx + extracted_features.shape[0], :] = extracted_features
-
-	model.train()
-
-	return centres
-
-
-def mixup_data(x, y, device, alpha=1.0):
-    """
-    Return mixed inputs, pair of targets and lambda
-    """
-    if (alpha > 0):
-        lam = np.random.beta(alpha, alpha)
-    else:
-        lam = 1
-
-    batch_size = x.size()[0]
-
-    index = torch.randperm(batch_size).to(device)
-
-    mixed_x = lam * x + (1-lam)*x[index, :]
-    y_a, y_b = y, y[index]
-    
-    return mixed_x, y_a, y_b, lam
-
-
-def mixup_criterion(criterion, pred, y_a, y_b, lam):
-    return lam * criterion(pred, y_a) + (1-lam) * criterion(pred, y_b)
 
 
 if __name__ == '__main__':
@@ -145,11 +68,11 @@ if __name__ == '__main__':
         no_max_pool = opt.no_max_pool,
         widen_factor = opt.resnet_widen_factor)
 
-    # loading pretrained model
-    print('\nLoading pretrained model\n')
-    pretrain_path = './data/pretrained/r3d50_KMS_200ep.pth'
-    pretrain = torch.load(pretrain_path, map_location='cpu')
-    model.load_state_dict(pretrain['state_dict'])
+    # # loading pretrained model
+    # print('\nLoading pretrained model\n')
+    # pretrain_path = './data/state/run1.pth'
+    # pretrain = torch.load(pretrain_path, map_location='cpu')
+    # model.load_state_dict(pretrain, strict=False)
 
     modules = list(model.children())[:-1]
     modules.append(nn.Flatten())
@@ -240,7 +163,7 @@ if __name__ == '__main__':
 
         if (epoch % opt.update_interval) == 0:
             print('\tUpdating kernel centres')
-            centres = update_centres(centres, model, update_loader, opt.batch_size)
+            centres = update_centres(centres, model, update_loader, opt.batch_size, device)
             print('\tFinding training set neighbours')
             centres = centres.cpu()
             neighbours_tr = find_neighbours(opt.num_neighbours, centres )
@@ -279,5 +202,7 @@ if __name__ == '__main__':
         print(f'| Epoch [{epoch}] | Loss [{loss}] | Accuracy [{acc}] |')
 
     print("Updating kernel centres (final time).")
-    centres = update_centres(centres, model, update_loader, opt.batch_size)
+    centres = update_centres(centres, model, update_loader, opt.batch_size, device)
 
+    print("\nSaving model state dict")
+    torch.save(model.state_dict(), "./data/state/run1_40_frames_resnet18.pth")
