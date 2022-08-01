@@ -72,3 +72,8 @@ def make_data_parallel(model, is_distributed, device):
         model = nn.DataParallel(model, device_ids=None).cuda()
 
     return model
+
+def save_model(model, kernel_classifier, centres, save_path, seed):
+    torch.save(model.state_dict(), save_path + "/" + seed + "model.pt")
+    torch.save(kernel_classifier.state_dict(), save_path + "/" + seed + "classifier.pt")
+    torch.save(centres, save_path + "/" + seed + "centres.pt")
