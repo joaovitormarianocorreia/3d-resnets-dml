@@ -1,53 +1,30 @@
+import time
 import torch
-import argparse
 import resnet
 import torch.nn as nn
 import numpy as np
 
 from tqdm import tqdm
-from torch.nn import CrossEntropyLoss
-from torch.optim import SGD, Adam, lr_scheduler
+from torch.optim import Adam
 from torch.autograd import Variable
-from pathlib import Path
 from torchvision.transforms import transforms
 from temporal_transforms import Compose as TemporalCompose, TemporalRandomCrop
 
-from model import get_fine_tuning_parameters
+from opts import parse_opts
+from stats import AverageMeter, Logger
 from classifier import GaussianKernels, find_neighbours
 from mixup import update_centres, mixup_data, mixup_criterion
 from dataset import get_training_data
 
 
-def parse_opts():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--model_depth', default=18, type=int, help='Depth of resnet (10 | 18 | 34 | 50 | 101)')
-    parser.add_argument('--n_classes', default=51, type=int, help= 'Number of classes (activitynet: 200, kinetics: 400 or 600, ucf101: 101, hmdb51: 51)')
-    parser.add_argument('--n_epochs', default=200, type=int, help= 'Number of epochs')
-    parser.add_argument('--batch_size', default=4, type=int, help='Batch Size')
-    parser.add_argument('--n_input_channels', default=3, type=int, help='Number of channels on input')
-    parser.add_argument('--resnet_shortcut', default='B', type=str, help='Shortcut type of resnet (A | B)')
-    parser.add_argument('--conv1_t_size', default=7, type=int, help='Kernel size in t dim of conv1.')
-    parser.add_argument('--conv1_t_stride', default=1, type=int, help='Stride in t dim of conv1.')
-    parser.add_argument('--no_max_pool', action='store_true', help='If true, the max pooling after conv1 is removed.')
-    parser.add_argument('--resnet_widen_factor', default=1.0, type=float, help='The number of feature maps of resnet is multiplied by this value')
-    parser.add_argument('--sample_size', default=112, type=int, help='Height and width of inputs')
-    parser.add_argument('--sample_duration', default=30, type=int, help='Temporal duration of inputs')
-    parser.add_argument('--video_path', default='./data/hmdb/jpg', type=Path, help='Directory path of videos')
-    parser.add_argument('--annotation_path', default='./data/hmdb/json/hmdb51_1.json', type=Path, help='Annotation file path')
-    parser.add_argument('--ft_begin_module', default='',type=str, help=('Module name of beginning of fine-tuning (conv1, layer1, fc, denseblock1, classifier, ...). The default means all layers are fine-tuned.'))
-    # gaussian kernel classifier
-    parser.add_argument('--sigma', default=10, type=int, help='Gaussian sigma.')
-    parser.add_argument('--num_neighbours', default=200, type=int, help='Number of Gaussian Kernel Classifier neighbours.')
-    parser.add_argument('--update_interval', default=5, type=int, help='Stored centres/neighbours are updated every update_interval epochs.')
-    # mixup
-    parser.add_argument('--alpha', default=1, type=float,help='mixup interpolation coefficient (default: 1)')
-    parser.add_argument('--scale_mixup', default=0.0001, type=float,help='scaling the mixup loss')
-    parser.add_argument('--beta', default=1, type=float,help='scaling the gauss loss')
-
-    return parser.parse_args()
+def save_model(model, kernel_classifier, centres, save_path, seed):
+    torch.save(model.state_dict(), save_path + "/" + seed + "model.pt")
+    torch.save(kernel_classifier.state_dict(), save_path + "/" + seed + "classifier.pt")
+    torch.save(centres, save_path + "/" + seed + "centres.pt")
 
 
 if __name__ == '__main__':
+
     # clean the cache memory before training
     torch.cuda.empty_cache()
 
@@ -57,10 +34,13 @@ if __name__ == '__main__':
     # set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    # create seed to the run 
+    seed = opt.model + "-DS" + opt.dataset + "-EP" + str(opt.n_epochs) + "-SM" + str(opt.scale_mixup) + "-A" + str(opt.alpha) + "-B" + str(opt.beta)
+
     # creating model
     model = resnet.generate_model(
         model_depth = opt.model_depth,
-        n_classes = 1139,
+        n_classes = 51,
         n_input_channels = opt.n_input_channels,
         shortcut_type = opt.resnet_shortcut,
         conv1_t_size = opt.conv1_t_size,
@@ -68,11 +48,11 @@ if __name__ == '__main__':
         no_max_pool = opt.no_max_pool,
         widen_factor = opt.resnet_widen_factor)
 
-    # # loading pretrained model
-    # print('\nLoading pretrained model\n')
-    # pretrain_path = './data/state/run1.pth'
-    # pretrain = torch.load(pretrain_path, map_location='cpu')
-    # model.load_state_dict(pretrain, strict=False)
+    # load pretrained model
+    if opt.load_pretrained:
+        print('\nLoading pretrained model\n')
+        pretrain = torch.load(opt.pretrained_path, map_location='cpu')
+        model.load_state_dict(pretrain, strict=False)
 
     modules = list(model.children())[:-1]
     modules.append(nn.Flatten())
@@ -148,18 +128,30 @@ if __name__ == '__main__':
 
     criterion = nn.NLLLoss().to(device)
 
-    # scheduler = lr_scheduler.MultiStepLR(optimizer, [50, 100, 150]) # set multistep milestones 
-
     # mixup criterion 
     criterion_mixup = nn.CrossEntropyLoss()
 
-    # begin of the training loop
+    # create loggers to the session
+    train_logger = Logger(opt.result_path / 'train.log', ['epoch', 'loss', 'acc', 'lr'])
+    train_batch_logger = Logger(opt.result_path / 'train_batch.log', ['epoch', 'batch', 'iter', 'loss', 'acc', 'lr'])
+
+    acc_geral = -1
+    best_epoch = -1
+
+    # training loop
     print('\nBegin Training\n')
     for epoch in range(opt.n_epochs):
         
         print(f'\nTrain at epoch {epoch}')
 
         model.train()
+
+        batch_time = AverageMeter()
+        data_time = AverageMeter()
+        losses = AverageMeter()
+        accuracies = AverageMeter()
+        
+        end_time = time.time()
 
         if (epoch % opt.update_interval) == 0:
             print('\tUpdating kernel centres')
@@ -169,9 +161,17 @@ if __name__ == '__main__':
             neighbours_tr = find_neighbours(opt.num_neighbours, centres )
             centres = centres.to(device)
 
+            if epoch > 0:
+                acc_actual = test()
+                if (acc_actual >= acc_geral):
+                    best_epoch = epoch
+                    acc_geral = acc_actual
+                    save_model(model, kernel_classifier, centres, opt.save_path, seed)
+
         running_loss = 0.0
         running_correct = 0
-
+        
+        # training epoch
         for i, data in tqdm(enumerate(train_loader, 0)):
             # setting inputs and targets
             inputs, labels, index = data
@@ -198,11 +198,46 @@ if __name__ == '__main__':
             correct = pred.eq(labels.view_as(pred)).sum().item()
             running_correct += correct
 
+            batch_time.update(time.time() - end_time)
+            end_time = time.time()
+
+            
+            train_batch_logger.log({
+                    'epoch': epoch,
+                    'batch': i + 1,
+                    'iter': (epoch - 1) * len(train_loader) + (i + 1),
+                    'loss': losses.val,
+                    'acc': accuracies.val,
+                    'lr': current_lr
+                })
+
+            print(
+                'Epoch: [{0}][{1}/{2}]\t'
+                'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                'Acc {acc.val:.3f} ({acc.avg:.3f})'.format(
+                    epoch,
+                    i + 1,
+                    len(train_loader),
+                    batch_time=batch_time,
+                    data_time=data_time,
+                    loss=losses,
+                    acc=accuracies))
+        
+
+        train_logger.log({
+            'epoch': epoch,
+            'loss': losses.avg,
+            'acc': accuracies.avg,
+            'lr': current_lr
+        })
+
         acc = 100. * running_correct / len(train_loader.dataset)
         print(f'| Epoch [{epoch}] | Loss [{loss}] | Accuracy [{acc}] |')
 
     print("Updating kernel centres (final time).")
     centres = update_centres(centres, model, update_loader, opt.batch_size, device)
 
-    print("\nSaving model state dict")
-    torch.save(model.state_dict(), "./data/state/run1_40_frames_resnet18.pth")
+    # save model after training
+    save_model(model, kernel_classifier, centres, opt.save_path, seed)
