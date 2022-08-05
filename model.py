@@ -77,3 +77,11 @@ def save_model(model, kernel_classifier, centres, save_path, seed):
     torch.save(model.state_dict(), save_path + "/" + seed + "model.pt")
     torch.save(kernel_classifier.state_dict(), save_path + "/" + seed + "classifier.pt")
     torch.save(centres, save_path + "/" + seed + "centres.pt")
+
+def get_lr(optimizer):
+    lrs = []
+    for param_group in optimizer.param_groups:
+        lr = float(param_group['lr'])
+        lrs.append(lr)
+
+    return max(lrs)

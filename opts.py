@@ -24,7 +24,7 @@ def parse_opts():
     parser.add_argument('--load_pretrained', default=False, type=bool, help='If true load pretrained model')
     parser.add_argument('--pretrained_path', default='', type=str, help='Path to the pretrained model')
     parser.add_argument('--save_path', default='./data/state/', type=str, help='Path of the save models dir')
-    parser.add_argument('--result_path', default=None, type=Path, help='Result directory path')
+    parser.add_argument('--result_path', default='./data/hmdb/results/', type=Path, help='Result directory path')
     # gaussian kernel classifier
     parser.add_argument('--sigma', default=10, type=int, help='Gaussian sigma.')
     parser.add_argument('--num_neighbours', default=200, type=int, help='Number of Gaussian Kernel Classifier neighbours.')
