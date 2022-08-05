@@ -15,12 +15,7 @@ from stats import AverageMeter, Logger
 from classifier import GaussianKernels, find_neighbours
 from mixup import update_centres, mixup_data, mixup_criterion
 from dataset import get_training_data
-
-
-def save_model(model, kernel_classifier, centres, save_path, seed):
-    torch.save(model.state_dict(), save_path + "/" + seed + "model.pt")
-    torch.save(kernel_classifier.state_dict(), save_path + "/" + seed + "classifier.pt")
-    torch.save(centres, save_path + "/" + seed + "centres.pt")
+from model import save_model, get_lr
 
 
 if __name__ == '__main__':
@@ -59,8 +54,8 @@ if __name__ == '__main__':
     model = nn.Sequential(*modules)
     model = model.to(device)
 
-    # parameters = get_fine_tuning_parameters(model, opt.ft_begin_module)
-    
+    model = nn.DataParallel(model, device_ids=None).cuda()
+
     # set up spatial transforms to data
     spatial_transform = transforms.Compose([
         transforms.Resize(opt.sample_size),
@@ -78,14 +73,22 @@ if __name__ == '__main__':
         transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])])
 
     # set up temporal transforms to data
-    temporal_transform = TemporalCompose([TemporalRandomCrop(opt.sample_duration)])
+    temporal_transform = TemporalCompose([TemporalRandomCrop(opt.sample_duration)]) 
 
     print('\nLoading data')
 
     # get training data
-    train_data = get_training_data(opt.video_path, opt.annotation_path, spatial_transform, temporal_transform)
+    train_data = get_training_data(
+        opt.video_path, 
+        opt.annotation_path, 
+        spatial_transform, 
+        temporal_transform)
 
-    update_data = get_training_data(opt.video_path, opt.annotation_path, update_transform, temporal_transform)
+    update_data = get_training_data(
+        opt.video_path, 
+        opt.annotation_path, 
+        update_transform, 
+        temporal_transform)
 
     # set train loader
     train_loader = torch.utils.data.DataLoader(
@@ -132,22 +135,22 @@ if __name__ == '__main__':
     criterion_mixup = nn.CrossEntropyLoss()
 
     # create loggers to the session
-    train_logger = Logger(opt.result_path / 'train.log', ['epoch', 'loss', 'acc', 'lr'])
-    train_batch_logger = Logger(opt.result_path / 'train_batch.log', ['epoch', 'batch', 'iter', 'loss', 'acc', 'lr'])
+    train_logger = Logger(opt.result_path / 'train.log', ['epoch', 'loss_mixup', 'loss_gauss' , 'loss', 'acc', 'lr'])
+    train_batch_logger = Logger(opt.result_path / 'train_batch.log', ['epoch', 'batch', 'iter', 'loss_mixup', 'loss_gauss', 'loss', 'acc', 'lr'])
 
-    acc_geral = -1
-    best_epoch = -1
+    model.train()
 
     # training loop
-    print('\nBegin Training\n')
     for epoch in range(opt.n_epochs):
         
         print(f'\nTrain at epoch {epoch}')
 
-        model.train()
+        
 
         batch_time = AverageMeter()
         data_time = AverageMeter()
+        losses_mixup = AverageMeter()
+        losses_gauss = AverageMeter()
         losses = AverageMeter()
         accuracies = AverageMeter()
         
@@ -161,18 +164,15 @@ if __name__ == '__main__':
             neighbours_tr = find_neighbours(opt.num_neighbours, centres )
             centres = centres.to(device)
 
-            if epoch > 0:
-                acc_actual = test()
-                if (acc_actual >= acc_geral):
-                    best_epoch = epoch
-                    acc_geral = acc_actual
-                    save_model(model, kernel_classifier, centres, opt.save_path, seed)
-
         running_loss = 0.0
         running_correct = 0
+
+        current_lr = get_lr(optimizer)
         
         # training epoch
         for i, data in tqdm(enumerate(train_loader, 0)):
+            data_time.update(time.time() - end_time)
+            
             # setting inputs and targets
             inputs, labels, index = data
             inputs = inputs.to(device)
@@ -188,7 +188,10 @@ if __name__ == '__main__':
             optimizer.zero_grad()
 
             log_prob = kernel_classifier(model(inputs), centres, centre_labels, neighbours_tr[index,:])
-            loss = criterion(log_prob, labels)
+            loss_gauss = criterion(log_prob, labels)  # gaussian loss
+            # scale_mixup = 0.01
+            loss = (opt.beta * loss_gauss) + (opt.scale_mixup * loss_mixup)
+            
             loss.backward()
             optimizer.step()
 
@@ -198,23 +201,33 @@ if __name__ == '__main__':
             correct = pred.eq(labels.view_as(pred)).sum().item()
             running_correct += correct
 
+            acc = 100. * running_correct / len(train_loader.dataset)
+
+            losses_mixup.update(loss_mixup, inputs.size(0))
+            losses_gauss.update(loss_gauss, inputs.size(0))
+            losses.update(loss, inputs.size(0))
+            accuracies.update(acc, inputs.size(0))
+
             batch_time.update(time.time() - end_time)
             end_time = time.time()
 
-            
             train_batch_logger.log({
-                    'epoch': epoch,
-                    'batch': i + 1,
-                    'iter': (epoch - 1) * len(train_loader) + (i + 1),
-                    'loss': losses.val,
-                    'acc': accuracies.val,
-                    'lr': current_lr
-                })
+                'epoch': epoch,
+                'batch': i + 1,
+                'iter': (epoch - 1) * len(train_loader) + (i + 1),
+                'loss_mixup': losses_mixup.val,
+                'loss_gauss': losses_gauss.val,
+                'loss': losses.val,
+                'acc': accuracies.val,
+                'lr': current_lr
+            })
 
             print(
                 'Epoch: [{0}][{1}/{2}]\t'
                 'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                 'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                'Mixup Loss {loss_mixup.val:.4f} ({loss_mixup.avg:.4f})\t'
+                'Gaussian Loss {loss_gauss.val:.4f} ({loss_gauss.avg:.4f})\t'
                 'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                 'Acc {acc.val:.3f} ({acc.avg:.3f})'.format(
                     epoch,
@@ -222,19 +235,20 @@ if __name__ == '__main__':
                     len(train_loader),
                     batch_time=batch_time,
                     data_time=data_time,
+                    loss_mixup=losses_mixup,
+                    loss_gauss=losses_gauss,
                     loss=losses,
                     acc=accuracies))
         
 
         train_logger.log({
             'epoch': epoch,
+            'loss_mixup': losses_mixup.avg,
+            'loss_gauss': losses_gauss.avg,
             'loss': losses.avg,
             'acc': accuracies.avg,
             'lr': current_lr
         })
-
-        acc = 100. * running_correct / len(train_loader.dataset)
-        print(f'| Epoch [{epoch}] | Loss [{loss}] | Accuracy [{acc}] |')
 
     print("Updating kernel centres (final time).")
     centres = update_centres(centres, model, update_loader, opt.batch_size, device)
